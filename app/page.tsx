@@ -1,65 +1,379 @@
-import Image from "next/image";
+"use client"
 
-export default function Home() {
+import { useState, useEffect, useCallback, useRef } from "react"
+import { useRouter } from "next/navigation"
+import Link from "next/link"
+import {
+  GitBranch,
+  ArrowRight,
+  CheckCircle2,
+  Circle,
+  Loader2,
+  AlertCircle,
+  Terminal,
+  Zap,
+  Lock,
+  Globe,
+} from "lucide-react"
+import { cn } from "@/lib/utils"
+
+type StepStatus = "pending" | "active" | "complete" | "failed"
+
+type Step = {
+  id: string
+  label: string
+  detail: string
+  status: StepStatus
+}
+
+type IngestResponse = { job_id: string; repo_id: string; status: string }
+type JobResponse = {
+  job_id: string
+  repo_id?: string
+  status: "PENDING" | "COMPLETE" | "FAILED"
+  step?: string        // "cloning" | "parsing" | "embedding" | "indexing"
+  progress?: number   // 0-100
+  error_message?: string | null
+}
+
+const STEPS: Step[] = [
+  { id: "cloning",   label: "Cloning",   detail: "Fetching repository from GitHub",      status: "pending" },
+  { id: "parsing",   label: "Parsing",   detail: "Analyzing code structure and symbols",  status: "pending" },
+  { id: "embedding", label: "Embedding", detail: "Generating semantic vector embeddings", status: "pending" },
+  { id: "indexing",  label: "Indexing",  detail: "Building searchable knowledge index",   status: "pending" },
+  { id: "ready",     label: "Ready",     detail: "Your codebase is ready to explore",     status: "pending" },
+]
+
+// Backend sends step: "cloning" | "parsing" | "embedding" | "indexing"
+const STEP_INDEX: Record<string, number> = {
+  cloning: 0, parsing: 1, embedding: 2, indexing: 3,
+}
+
+function StepIcon({ status }: { status: StepStatus }) {
+  if (status === "complete")
+    return <CheckCircle2 className="w-5 h-5 text-indigo-400 shrink-0" />
+  if (status === "active")
+    return (
+      <div className="w-5 h-5 rounded-full border-2 border-indigo-500 border-t-transparent animate-spin-slow shrink-0" />
+    )
+  if (status === "failed")
+    return <AlertCircle className="w-5 h-5 text-red-400 shrink-0" />
+  return <Circle className="w-5 h-5 text-zinc-600 shrink-0" />
+}
+
+export default function IngestPage() {
+  const router = useRouter()
+  const [url, setUrl] = useState("")
+  const [isAnalyzing, setIsAnalyzing] = useState(false)
+  const [jobId, setJobId] = useState<string | null>(null)
+  const [steps, setSteps] = useState<Step[]>(STEPS)
+  const [error, setError] = useState<string | null>(null)
+  const [showProgress, setShowProgress] = useState(false)
+  const inputRef = useRef<HTMLInputElement>(null)
+  const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  // Captured immediately from the ingest response so navigation never depends on the poll
+  const repoIdRef = useRef<string | null>(null)
+
+  const stopPolling = useCallback(() => {
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current)
+      pollingRef.current = null
+    }
+  }, [])
+
+  const pollJob = useCallback(
+    async (id: string) => {
+      try {
+        const res = await fetch(`http://localhost:8001/api/repos/jobs/${id}`)
+        if (!res.ok) throw new Error(`Status ${res.status}`)
+        const data: JobResponse = await res.json()
+
+        if (data.status === "FAILED") {
+          stopPolling()
+          setError(data.error_message ?? "Analysis failed. Please try again.")
+          setIsAnalyzing(false)
+          setSteps((prev) =>
+            prev.map((s) => (s.status === "active" ? { ...s, status: "failed" } : s))
+          )
+          return
+        }
+
+        if (data.status === "COMPLETE") {
+          stopPolling()
+          setSteps((prev) => prev.map((s) => ({ ...s, status: "complete" })))
+          // Prefer the repo_id captured at ingest time; fall back to the poll field
+          const targetId = repoIdRef.current ?? data.repo_id
+          if (targetId) setTimeout(() => router.push(`/${targetId}`), 900)
+          return
+        }
+
+        // PENDING — use the `step` field to show which pipeline stage is active
+        if (data.step) {
+          const activeIdx = STEP_INDEX[data.step] ?? -1
+          setSteps((prev) =>
+            prev.map((s, i) => ({
+              ...s,
+              status:
+                i < activeIdx ? "complete" : i === activeIdx ? "active" : "pending",
+            }))
+          )
+        }
+      } catch {
+        stopPolling()
+        setError("Cannot reach backend. Is the server running at localhost:8001?")
+        setIsAnalyzing(false)
+      }
+    },
+    [router, stopPolling]
+  )
+
+  useEffect(() => {
+    if (!jobId) return
+    pollingRef.current = setInterval(() => pollJob(jobId), 2000)
+    pollJob(jobId)
+    return stopPolling
+  }, [jobId, pollJob, stopPolling])
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    const trimmed = url.trim()
+    if (!trimmed) return
+
+    setError(null)
+    setIsAnalyzing(true)
+    setShowProgress(true)
+    setSteps(STEPS.map((s) => ({ ...s, status: "pending" })))
+
+    try {
+      const res = await fetch("http://localhost:8001/api/repos/ingest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ github_url: trimmed, user_id: "demo" }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}))
+        throw new Error(body.detail ?? body.message ?? `Error ${res.status}`)
+      }
+      const data: IngestResponse = await res.json()
+      // Capture repo_id immediately — don't wait for the poll to surface it
+      repoIdRef.current = data.repo_id
+      setJobId(data.job_id)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to start analysis.")
+      setIsAnalyzing(false)
+      setSteps(STEPS)
+    }
+  }
+
+  const completedCount = steps.filter((s) => s.status === "complete").length
+  const progressPct = showProgress ? Math.round((completedCount / steps.length) * 100) : 0
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="min-h-screen bg-[#0a0a0a] flex flex-col">
+      {/* Ambient background */}
+      <div className="fixed inset-0 pointer-events-none">
+        <div className="dot-grid absolute inset-0 opacity-40" />
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] rounded-full bg-indigo-600/8 blur-[120px]" />
+        <div className="absolute bottom-1/4 right-1/4 w-[300px] h-[300px] rounded-full bg-indigo-800/6 blur-[100px]" />
+      </div>
+
+      {/* Navbar */}
+      <nav className="relative z-10 flex items-center justify-between px-6 py-4 border-b border-zinc-800/60">
+        <div className="flex items-center gap-2">
+          <div className="w-7 h-7 rounded bg-indigo-600 flex items-center justify-center">
+            <Terminal className="w-4 h-4 text-white" />
+          </div>
+          <span className="font-mono text-sm font-semibold text-zinc-100 tracking-tight cursor-blink">
+            CodeBase
+          </span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
+        <div className="flex items-center gap-1">
+          <Link
+            href="/pricing"
+            className="px-3 py-1.5 text-sm text-zinc-400 hover:text-zinc-100 transition-colors rounded-md hover:bg-zinc-800/60"
           >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
+            Pricing
+          </Link>
           <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
+            href="https://github.com"
             target="_blank"
-            rel="noopener noreferrer"
+            rel="noreferrer"
+            className="p-2 text-zinc-500 hover:text-zinc-200 transition-colors rounded-md hover:bg-zinc-800/60"
           >
-            Documentation
+            <GitBranch className="w-4 h-4" />
           </a>
+        </div>
+      </nav>
+
+      {/* Hero */}
+      <main className="relative z-10 flex-1 flex flex-col items-center justify-center px-4 py-16">
+        <div className="w-full max-w-2xl flex flex-col items-center text-center gap-8">
+          {/* Badge */}
+          <div className="animate-slide-up inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-xs font-mono">
+            <Zap className="w-3 h-3" />
+            AI-powered codebase intelligence
+          </div>
+
+          {/* Heading */}
+          <div className="animate-slide-up [animation-delay:80ms] flex flex-col gap-3">
+            <h1 className="font-display text-5xl sm:text-6xl font-bold text-zinc-50 leading-[1.05] tracking-tight">
+              Understand any codebase
+              <br />
+              <span className="text-shimmer">in 60 seconds</span>
+            </h1>
+            <p className="text-zinc-400 text-lg font-light max-w-lg mx-auto leading-relaxed">
+              Drop a GitHub URL. Get instant answers, architecture overviews, and
+              deep code understanding — powered by AI.
+            </p>
+          </div>
+
+          {/* Input form */}
+          <form
+            onSubmit={handleSubmit}
+            className="animate-slide-up [animation-delay:160ms] w-full"
+          >
+            <div
+              className={cn(
+                "flex items-center gap-0 rounded-xl border bg-zinc-900/80 backdrop-blur-sm transition-all duration-300",
+                error
+                  ? "border-red-500/50"
+                  : isAnalyzing
+                  ? "border-indigo-500/50 glow-indigo"
+                  : "border-zinc-700/60 hover:border-zinc-600/80 focus-within:border-indigo-500/60 focus-within:glow-indigo-sm"
+              )}
+            >
+              <div className="flex items-center gap-2 px-4 text-zinc-500">
+                <GitBranch className="w-4 h-4 shrink-0" />
+              </div>
+              <input
+                ref={inputRef}
+                type="url"
+                value={url}
+                onChange={(e) => { setUrl(e.target.value); setError(null) }}
+                placeholder="https://github.com/owner/repository"
+                disabled={isAnalyzing}
+                className="flex-1 bg-transparent py-3.5 text-sm text-zinc-100 placeholder:text-zinc-600 outline-none font-mono disabled:opacity-50"
+              />
+              <button
+                type="submit"
+                disabled={isAnalyzing || !url.trim()}
+                className={cn(
+                  "flex items-center gap-2 m-1.5 px-5 py-2.5 rounded-lg text-sm font-semibold transition-all duration-200",
+                  isAnalyzing || !url.trim()
+                    ? "bg-zinc-700 text-zinc-400 cursor-not-allowed"
+                    : "bg-indigo-600 hover:bg-indigo-500 text-white shadow-lg shadow-indigo-500/20 hover:shadow-indigo-500/30 active:scale-[0.97]"
+                )}
+              >
+                {isAnalyzing ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    Analyzing
+                  </>
+                ) : (
+                  <>
+                    Analyze
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
+              </button>
+            </div>
+
+            {error && (
+              <div className="mt-3 flex items-center gap-2 text-red-400 text-sm animate-slide-up">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                {error}
+              </div>
+            )}
+          </form>
+
+          {/* Progress panel */}
+          {showProgress && (
+            <div className="animate-slide-up w-full rounded-xl border border-zinc-800/80 bg-zinc-900/60 backdrop-blur-sm overflow-hidden">
+              {/* Progress bar */}
+              <div className="h-0.5 bg-zinc-800">
+                <div
+                  className="h-full bg-gradient-to-r from-indigo-600 to-indigo-400 transition-all duration-700 ease-out"
+                  style={{ width: `${progressPct}%` }}
+                />
+              </div>
+
+              <div className="p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <span className="text-xs font-mono text-zinc-500 uppercase tracking-widest">
+                    Analysis Pipeline
+                  </span>
+                  <span className="text-xs font-mono text-zinc-500">
+                    {completedCount}/{steps.length} steps
+                  </span>
+                </div>
+
+                <ol className="space-y-1">
+                  {steps.map((step, i) => (
+                    <li
+                      key={step.id}
+                      className={cn(
+                        "flex items-center gap-3 px-3 py-2.5 rounded-lg transition-all duration-300",
+                        step.status === "active" && "bg-indigo-500/8 border border-indigo-500/15",
+                        step.status === "complete" && "opacity-60",
+                        step.status === "pending" && "opacity-40"
+                      )}
+                      style={{ animationDelay: `${i * 60}ms` }}
+                    >
+                      <StepIcon status={step.status} />
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={cn(
+                              "text-sm font-medium font-mono",
+                              step.status === "complete" && "text-zinc-400",
+                              step.status === "active" && "text-indigo-300",
+                              step.status === "pending" && "text-zinc-600",
+                              step.status === "failed" && "text-red-400"
+                            )}
+                          >
+                            {step.label}
+                          </span>
+                          {step.status === "active" && (
+                            <span className="text-xs text-zinc-500">{step.detail}</span>
+                          )}
+                        </div>
+                      </div>
+                      {step.status === "active" && (
+                        <div className="flex gap-0.5">
+                          {[0, 1, 2].map((j) => (
+                            <span
+                              key={j}
+                              className="w-1 h-1 rounded-full bg-indigo-400 animate-pulse"
+                              style={{ animationDelay: `${j * 200}ms` }}
+                            />
+                          ))}
+                        </div>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              </div>
+            </div>
+          )}
+
+          {/* Trust signals */}
+          {!showProgress && (
+            <div className="animate-slide-up [animation-delay:240ms] flex items-center gap-6 text-xs text-zinc-600">
+              <span className="flex items-center gap-1.5">
+                <Lock className="w-3 h-3" /> No data stored
+              </span>
+              <span className="w-px h-3 bg-zinc-800" />
+              <span className="flex items-center gap-1.5">
+                <Zap className="w-3 h-3" /> Results in ~60s
+              </span>
+              <span className="w-px h-3 bg-zinc-800" />
+              <span className="flex items-center gap-1.5">
+                <Globe className="w-3 h-3" /> Any public repo
+              </span>
+            </div>
+          )}
         </div>
       </main>
     </div>
-  );
+  )
 }
