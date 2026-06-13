@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../../../Downloads/code-base-landing-page/app"
+		},
+		{
+			"path": "../../../Downloads/code-base-landing-page/components"
+		},
+		{
+			"path": "../../../Downloads/code-base-landing-page/lib"
+		},
+		{
+			"path": "../../../Downloads/code-base-landing-page/public"
+		}
+	],
+	"settings": {}
+}

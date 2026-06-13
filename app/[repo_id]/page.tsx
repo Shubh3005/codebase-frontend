@@ -6,9 +6,6 @@ import Link from "next/link"
 import {
   Send,
   Terminal,
-  FileCode2,
-  FolderOpen,
-  ChevronRight,
   Bot,
   User,
   Loader2,
@@ -16,15 +13,18 @@ import {
   AlertCircle,
   MessageSquare,
   Home,
+  FileCode2,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001"
+
 type Citation = {
   file_path: string
-  start_line?: number
-  end_line?: number
+  line_start: number
+  line_end: number
+  symbol_name?: string
   github_url?: string
-  snippet?: string
 }
 
 type Message = {
@@ -40,30 +40,20 @@ type QueryResponse = {
   session_id?: string
 }
 
-const PLACEHOLDER_FILES = [
-  { name: "README.md", type: "file" },
-  { name: "src/", type: "folder" },
-  { name: "src/index.ts", type: "file" },
-  { name: "src/utils.ts", type: "file" },
-  { name: "src/types.ts", type: "file" },
-  { name: "package.json", type: "file" },
-  { name: ".env.example", type: "file" },
-]
-
 const SUGGESTED_QUESTIONS = [
-  "What does this codebase do?",
-  "How is the project structured?",
-  "What are the main entry points?",
-  "How do I run this project locally?",
+  "How does repo ingestion work end to end?",
+  "How are code chunks stored and retrieved from DynamoDB?",
+  "What retrieval method is used — how does a question get matched to code?",
+  "What file formats does the parser support beyond Python?",
 ]
 
 function CitationPill({ citation }: { citation: Citation }) {
   const label = citation.file_path.split("/").pop() ?? citation.file_path
   const lineInfo =
-    citation.start_line != null
-      ? citation.end_line != null && citation.end_line !== citation.start_line
-        ? `L${citation.start_line}–${citation.end_line}`
-        : `L${citation.start_line}`
+    citation.line_start != null
+      ? citation.line_end != null && citation.line_end !== citation.line_start
+        ? `L${citation.line_start}–${citation.line_end}`
+        : `L${citation.line_start}`
       : null
 
   const content = (
@@ -157,6 +147,10 @@ export default function RepoChatPage() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Recover the GitHub URL stored by the ingest page via localStorage
+  const githubUrl = (() => {
+    try { return localStorage.getItem(`codebase:repo:${repoId}`) } catch { return null }
+  })()
   // Starts null — omitted from the first request so the backend creates a fresh session.
   // The returned session_id is then stored here and sent on every subsequent request.
   const sessionIdRef = useRef<string | null>(null)
@@ -171,8 +165,10 @@ export default function RepoChatPage() {
     scrollToBottom()
   }, [messages, scrollToBottom])
 
-  // repo_id is a UUID from the backend — display it truncated
-  const repoName = repoId.length > 12 ? `${repoId.slice(0, 8)}…` : repoId
+  // Derive a human-readable label: "owner/repo" from the GitHub URL or fallback UUID prefix
+  const repoName = githubUrl
+    ? githubUrl.replace(/^https?:\/\/github\.com\//, "").replace(/\/$/, "")
+    : repoId.length > 12 ? `${repoId.slice(0, 8)}…` : repoId
 
   const sendMessage = useCallback(
     async (question: string) => {
@@ -195,7 +191,7 @@ export default function RepoChatPage() {
         const body: Record<string, string> = { question: trimmed }
         if (sessionIdRef.current) body.session_id = sessionIdRef.current
 
-        const res = await fetch(`http://localhost:8001/api/repos/${repoId}/query`, {
+        const res = await fetch(`${API_BASE}/api/repos/${repoId}/query`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -271,41 +267,36 @@ export default function RepoChatPage() {
               Active Repo
             </span>
           </div>
-          <p className="text-sm text-zinc-200 font-mono font-medium truncate">
-            {repoName}
-          </p>
-          <p className="text-xs text-zinc-600 font-mono mt-0.5 truncate">
-            id: {repoId}
-          </p>
+          {githubUrl ? (
+            <a
+              href={githubUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="flex items-center gap-1.5 group"
+            >
+              <p className="text-sm text-zinc-200 font-mono font-medium truncate group-hover:text-indigo-300 transition-colors">
+                {repoName}
+              </p>
+              <ExternalLink className="w-3 h-3 text-zinc-600 group-hover:text-indigo-400 shrink-0 transition-colors" />
+            </a>
+          ) : (
+            <p className="text-sm text-zinc-200 font-mono font-medium truncate">
+              {repoName}
+            </p>
+          )}
         </div>
 
-        {/* File tree */}
+        {/* File explorer */}
         <div className="flex-1 overflow-y-auto px-2 py-3">
           <div className="flex items-center gap-2 px-2 mb-2">
-            <FolderOpen className="w-3.5 h-3.5 text-zinc-500" />
+            <FileCode2 className="w-3.5 h-3.5 text-zinc-500" />
             <span className="text-xs font-mono text-zinc-500 uppercase tracking-widest">
               Files
             </span>
           </div>
-          <ul className="space-y-0.5">
-            {PLACEHOLDER_FILES.map((file) => (
-              <li key={file.name}>
-                <button
-                  className="w-full flex items-center gap-2 px-2 py-1.5 rounded-md text-xs font-mono text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800/60 transition-colors text-left"
-                >
-                  {file.type === "folder" ? (
-                    <FolderOpen className="w-3.5 h-3.5 shrink-0 text-zinc-600" />
-                  ) : (
-                    <FileCode2 className="w-3.5 h-3.5 shrink-0 text-zinc-700" />
-                  )}
-                  <span className="truncate">{file.name}</span>
-                  {file.type === "folder" && (
-                    <ChevronRight className="w-3 h-3 ml-auto shrink-0 opacity-40" />
-                  )}
-                </button>
-              </li>
-            ))}
-          </ul>
+          <p className="px-2 text-xs text-zinc-700 font-mono leading-relaxed">
+            File explorer coming soon — use citations in answers to jump to source.
+          </p>
         </div>
 
         {/* Back link */}

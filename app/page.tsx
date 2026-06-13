@@ -17,6 +17,10 @@ import {
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
+const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001"
+
+const GITHUB_REPO_RE = /^https?:\/\/github\.com\/[^/]+\/[^/]+\/?$/
+
 type StepStatus = "pending" | "active" | "complete" | "failed"
 
 type Step = {
@@ -30,7 +34,7 @@ type IngestResponse = { job_id: string; repo_id: string; status: string }
 type JobResponse = {
   job_id: string
   repo_id?: string
-  status: "PENDING" | "COMPLETE" | "FAILED"
+  status: "QUEUED" | "PROCESSING" | "COMPLETE" | "FAILED"
   step?: string        // "cloning" | "parsing" | "embedding" | "indexing"
   progress?: number   // 0-100
   error_message?: string | null
@@ -84,7 +88,7 @@ export default function IngestPage() {
   const pollJob = useCallback(
     async (id: string) => {
       try {
-        const res = await fetch(`http://localhost:8001/api/repos/jobs/${id}`)
+        const res = await fetch(`${API_BASE}/api/repos/jobs/${id}`)
         if (!res.ok) throw new Error(`Status ${res.status}`)
         const data: JobResponse = await res.json()
 
@@ -120,7 +124,7 @@ export default function IngestPage() {
         }
       } catch {
         stopPolling()
-        setError("Cannot reach backend. Is the server running at localhost:8001?")
+        setError(`Cannot reach backend at ${API_BASE}. Is the server running?`)
         setIsAnalyzing(false)
       }
     },
@@ -129,9 +133,11 @@ export default function IngestPage() {
 
   useEffect(() => {
     if (!jobId) return
+    // Defer the immediate poll one tick to avoid calling setState synchronously
+    // inside the effect body (which triggers the react-hooks/set-state-in-effect rule).
+    const t = setTimeout(() => pollJob(jobId), 0)
     pollingRef.current = setInterval(() => pollJob(jobId), 2000)
-    pollJob(jobId)
-    return stopPolling
+    return () => { clearTimeout(t); stopPolling() }
   }, [jobId, pollJob, stopPolling])
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -139,13 +145,18 @@ export default function IngestPage() {
     const trimmed = url.trim()
     if (!trimmed) return
 
+    if (!GITHUB_REPO_RE.test(trimmed)) {
+      setError("Please enter a valid public GitHub repository URL (e.g. https://github.com/owner/repo)")
+      return
+    }
+
     setError(null)
     setIsAnalyzing(true)
     setShowProgress(true)
     setSteps(STEPS.map((s) => ({ ...s, status: "pending" })))
 
     try {
-      const res = await fetch("http://localhost:8001/api/repos/ingest", {
+      const res = await fetch(`${API_BASE}/api/repos/ingest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ github_url: trimmed, user_id: "demo" }),
@@ -157,6 +168,8 @@ export default function IngestPage() {
       const data: IngestResponse = await res.json()
       // Capture repo_id immediately — don't wait for the poll to surface it
       repoIdRef.current = data.repo_id
+      // Persist the GitHub URL so the Q&A page can display the real repo name
+      try { localStorage.setItem(`codebase:repo:${data.repo_id}`, trimmed) } catch { /* ignore */ }
       setJobId(data.job_id)
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to start analysis.")
