@@ -373,7 +373,7 @@ export default function IngestPage() {
           {!showProgress && (
             <div className="animate-slide-up [animation-delay:240ms] flex items-center gap-6 text-xs text-zinc-600">
               <span className="flex items-center gap-1.5">
-                <Lock className="w-3 h-3" /> No data stored
+                <Lock className="w-3 h-3" /> Source code never retained
               </span>
               <span className="w-px h-3 bg-zinc-800" />
               <span className="flex items-center gap-1.5">

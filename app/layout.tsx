@@ -26,7 +26,7 @@ const syne = Syne({
 export const metadata: Metadata = {
   title: "CodeBase — Understand any codebase in 60 seconds",
   description: "AI-powered codebase onboarding. Drop a GitHub URL, get instant understanding.",
-  icons: { icon: "/favicon.ico" },
+  icons: { icon: "/next.svg" },
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

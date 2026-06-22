@@ -41,10 +41,10 @@ type QueryResponse = {
 }
 
 const SUGGESTED_QUESTIONS = [
-  "How does repo ingestion work end to end?",
-  "How are code chunks stored and retrieved from DynamoDB?",
-  "What retrieval method is used — how does a question get matched to code?",
-  "What file formats does the parser support beyond Python?",
+  "What is the entry point of this application?",
+  "What are the main modules or components?",
+  "How does the data flow through this codebase?",
+  "What dependencies does this project use?",
 ]
 
 function CitationPill({ citation }: { citation: Citation }) {
@@ -130,7 +130,7 @@ function MessageBubble({ message }: { message: Message }) {
         {message.citations && message.citations.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-1">
             {message.citations.map((c, i) => (
-              <CitationPill key={i} citation={c} />
+              <CitationPill key={`${c.file_path}:${c.line_start}:${i}`} citation={c} />
             ))}
           </div>
         )}
@@ -147,10 +147,17 @@ export default function RepoChatPage() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  // Recover the GitHub URL stored by the ingest page via localStorage
-  const githubUrl = (() => {
-    try { return localStorage.getItem(`codebase:repo:${repoId}`) } catch { return null }
-  })()
+  // Recover the GitHub URL stored by the ingest page via localStorage — read after
+  // mount to avoid an SSR/client hydration mismatch.
+  const [githubUrl, setGithubUrl] = useState<string | null>(null)
+  useEffect(() => {
+    // Defer one tick so setState runs in a callback, not the effect body directly
+    // (matches the project's react-hooks/set-state-in-effect convention).
+    const t = setTimeout(() => {
+      try { setGithubUrl(localStorage.getItem(`codebase:repo:${repoId}`)) } catch {}
+    }, 0)
+    return () => clearTimeout(t)
+  }, [repoId])
   // Starts null — omitted from the first request so the backend creates a fresh session.
   // The returned session_id is then stored here and sent on every subsequent request.
   const sessionIdRef = useRef<string | null>(null)
