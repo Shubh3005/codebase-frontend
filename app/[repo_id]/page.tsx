@@ -14,6 +14,8 @@ import {
   MessageSquare,
   Home,
   FileCode2,
+  GitCompare,
+  X,
 } from "lucide-react"
 import { cn } from "@/lib/utils"
 
@@ -32,12 +34,30 @@ type Message = {
   role: "user" | "assistant"
   content: string
   citations?: Citation[]
+  citationsRepo1?: Citation[]
+  citationsRepo2?: Citation[]
+  repo1Name?: string
+  repo2Name?: string
 }
 
 type QueryResponse = {
   answer: string
   citations?: Citation[]
   session_id?: string
+}
+
+type CompareModalState = {
+  open: boolean
+  secondUrl: string
+  question: string
+  status: "idle" | "ingesting" | "comparing"
+  error: string | null
+}
+
+type RepoOverview = {
+  primaryLanguage: string
+  totalFiles: number
+  entryPoints: string[]
 }
 
 const SUGGESTED_QUESTIONS = [
@@ -126,7 +146,7 @@ function MessageBubble({ message }: { message: Message }) {
           {message.content}
         </div>
 
-        {/* Citations */}
+        {/* Standard citations */}
         {message.citations && message.citations.length > 0 && (
           <div className="flex flex-wrap gap-1.5 px-1">
             {message.citations.map((c, i) => (
@@ -134,6 +154,32 @@ function MessageBubble({ message }: { message: Message }) {
             ))}
           </div>
         )}
+
+        {/* Compare citations — two labelled groups */}
+        {(message.citationsRepo1?.length || message.citationsRepo2?.length) ? (
+          <div className="flex flex-col gap-1.5 px-1">
+            {message.citationsRepo1 && message.citationsRepo1.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-mono text-zinc-500 shrink-0">
+                  [Repo 1{message.repo1Name ? `: ${message.repo1Name}` : ""}]
+                </span>
+                {message.citationsRepo1.map((c, i) => (
+                  <CitationPill key={`r1:${c.file_path}:${c.line_start}:${i}`} citation={c} />
+                ))}
+              </div>
+            )}
+            {message.citationsRepo2 && message.citationsRepo2.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span className="text-xs font-mono text-zinc-500 shrink-0">
+                  [Repo 2{message.repo2Name ? `: ${message.repo2Name}` : ""}]
+                </span>
+                {message.citationsRepo2.map((c, i) => (
+                  <CitationPill key={`r2:${c.file_path}:${c.line_start}:${i}`} citation={c} />
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -147,6 +193,10 @@ export default function RepoChatPage() {
   const [input, setInput] = useState("")
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [overview, setOverview] = useState<RepoOverview | null>(null)
+  const [compareModal, setCompareModal] = useState<CompareModalState>({
+    open: false, secondUrl: "", question: "", status: "idle", error: null,
+  })
   // Recover the GitHub URL stored by the ingest page via localStorage — read after
   // mount to avoid an SSR/client hydration mismatch.
   const [githubUrl, setGithubUrl] = useState<string | null>(null)
@@ -158,6 +208,23 @@ export default function RepoChatPage() {
     }, 0)
     return () => clearTimeout(t)
   }, [repoId])
+  useEffect(() => {
+    fetch(`${API_BASE}/api/repos/${repoId}/summary`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!data) return
+        const langs: Record<string, number> = data.languages ?? {}
+        const primaryLanguage =
+          Object.entries(langs).sort((a, b) => b[1] - a[1])[0]?.[0] ?? "Unknown"
+        setOverview({
+          primaryLanguage,
+          totalFiles: data.total_files,
+          entryPoints: data.entry_points ?? [],
+        })
+      })
+      .catch(() => {})
+  }, [repoId])
+
   // Starts null — omitted from the first request so the backend creates a fresh session.
   // The returned session_id is then stored here and sent on every subsequent request.
   const sessionIdRef = useRef<string | null>(null)
@@ -252,6 +319,75 @@ export default function RepoChatPage() {
     e.target.style.height = `${Math.min(e.target.scrollHeight, 160)}px`
   }
 
+  const handleCompare = async () => {
+    const { secondUrl, question } = compareModal
+    setCompareModal((prev) => ({ ...prev, status: "ingesting", error: null }))
+
+    try {
+      // 1. Ingest the second repo
+      const ingestRes = await fetch(`${API_BASE}/api/repos/ingest`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ github_url: secondUrl }),
+      })
+      if (!ingestRes.ok) {
+        const err = await ingestRes.json().catch(() => ({}))
+        throw new Error(err.detail ?? "Failed to start ingestion")
+      }
+      const { job_id, repo_id: secondRepoId } = await ingestRes.json()
+
+      // 2. Poll until COMPLETE or FAILED
+      let jobStatus = "QUEUED"
+      while (jobStatus !== "COMPLETE" && jobStatus !== "FAILED") {
+        await new Promise((r) => setTimeout(r, 2500))
+        const pollRes = await fetch(`${API_BASE}/api/repos/jobs/${job_id}`)
+        const pollData = await pollRes.json()
+        jobStatus = pollData.status
+        if (jobStatus === "FAILED") {
+          throw new Error(pollData.error_message ?? "Ingestion failed")
+        }
+      }
+
+      // 3. Run comparison
+      setCompareModal((prev) => ({ ...prev, status: "comparing" }))
+      const compareRes = await fetch(`${API_BASE}/api/repos/compare`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ repo_ids: [repoId, secondRepoId], question }),
+      })
+      if (!compareRes.ok) {
+        const err = await compareRes.json().catch(() => ({}))
+        throw new Error(err.detail ?? "Comparison failed")
+      }
+      const data = await compareRes.json()
+
+      // 4. Add to chat
+      const secondRepoName = secondUrl
+        .replace(/^https?:\/\/github\.com\//, "")
+        .replace(/\/$/, "")
+      setMessages((prev) => [
+        ...prev,
+        { id: crypto.randomUUID(), role: "user", content: `[Compare] ${question}` },
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: data.answer,
+          citationsRepo1: data.citations_repo1,
+          citationsRepo2: data.citations_repo2,
+          repo1Name: repoName,
+          repo2Name: secondRepoName,
+        },
+      ])
+      setCompareModal({ open: false, secondUrl: "", question: "", status: "idle", error: null })
+    } catch (err) {
+      setCompareModal((prev) => ({
+        ...prev,
+        status: "idle",
+        error: err instanceof Error ? err.message : "Something went wrong",
+      }))
+    }
+  }
+
   return (
     <div className="h-screen flex bg-[#0a0a0a] overflow-hidden">
       {/* ── Sidebar ── */}
@@ -293,6 +429,31 @@ export default function RepoChatPage() {
           )}
         </div>
 
+        {/* Repo Overview */}
+        {overview && (
+          <div className="px-4 py-3 border-b border-zinc-800/40">
+            <p className="text-xs font-mono text-zinc-500 uppercase tracking-widest mb-2">
+              Overview
+            </p>
+            <div className="space-y-1">
+              <p className="text-xs font-mono text-zinc-400">
+                <span className="text-zinc-600">lang&nbsp;&nbsp;</span>
+                {overview.primaryLanguage}
+              </p>
+              <p className="text-xs font-mono text-zinc-400">
+                <span className="text-zinc-600">files&nbsp;&nbsp;</span>
+                {overview.totalFiles}
+              </p>
+              <p className="text-xs font-mono text-zinc-400">
+                <span className="text-zinc-600">entry&nbsp;&nbsp;</span>
+                {overview.entryPoints.length > 0
+                  ? overview.entryPoints.join(", ")
+                  : "none detected"}
+              </p>
+            </div>
+          </div>
+        )}
+
         {/* File explorer */}
         <div className="flex-1 overflow-y-auto px-2 py-3">
           <div className="flex items-center gap-2 px-2 mb-2">
@@ -329,9 +490,26 @@ export default function RepoChatPage() {
               <span className="font-mono text-indigo-300">{repoName}</span>
             </span>
           </div>
-          <span className="text-xs font-mono text-zinc-600">
-            {repoId.slice(0, 8)}
-          </span>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={() =>
+                setCompareModal({
+                  open: true,
+                  secondUrl: "",
+                  question: input.trim(),
+                  status: "idle",
+                  error: null,
+                })
+              }
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-mono text-zinc-400 border border-zinc-700/60 hover:text-zinc-200 hover:border-zinc-600 transition-all duration-200"
+            >
+              <GitCompare className="w-3 h-3" />
+              Compare
+            </button>
+            <span className="text-xs font-mono text-zinc-600">
+              {repoId.slice(0, 8)}
+            </span>
+          </div>
         </div>
 
         {/* Messages */}
@@ -443,6 +621,110 @@ export default function RepoChatPage() {
           </p>
         </div>
       </div>
+
+      {/* ── Compare modal ── */}
+      {compareModal.open && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="w-full max-w-md mx-4 bg-zinc-900 border border-zinc-700/60 rounded-2xl p-6 space-y-4 shadow-2xl">
+            {/* Title row */}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <GitCompare className="w-4 h-4 text-indigo-400" />
+                <h2 className="text-sm font-mono font-semibold text-zinc-100">
+                  Compare repos
+                </h2>
+              </div>
+              <button
+                onClick={() =>
+                  setCompareModal((prev) => ({ ...prev, open: false }))
+                }
+                className="text-zinc-500 hover:text-zinc-200 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Current repo label */}
+            <p className="text-xs font-mono text-zinc-600">
+              Repo 1: <span className="text-zinc-400">{repoName}</span>
+            </p>
+
+            {/* Second URL */}
+            <div>
+              <label className="text-xs font-mono text-zinc-500 mb-1.5 block">
+                Second GitHub URL
+              </label>
+              <input
+                type="url"
+                value={compareModal.secondUrl}
+                onChange={(e) =>
+                  setCompareModal((prev) => ({ ...prev, secondUrl: e.target.value }))
+                }
+                placeholder="https://github.com/owner/repo"
+                disabled={compareModal.status !== "idle"}
+                className="w-full bg-zinc-800/80 border border-zinc-700/60 rounded-lg px-3 py-2 text-sm font-mono text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-indigo-500/50 disabled:opacity-50 transition-colors"
+              />
+            </div>
+
+            {/* Question */}
+            <div>
+              <label className="text-xs font-mono text-zinc-500 mb-1.5 block">
+                What do you want to compare?
+              </label>
+              <input
+                type="text"
+                value={compareModal.question}
+                onChange={(e) =>
+                  setCompareModal((prev) => ({ ...prev, question: e.target.value }))
+                }
+                placeholder="How does authentication work?"
+                disabled={compareModal.status !== "idle"}
+                className="w-full bg-zinc-800/80 border border-zinc-700/60 rounded-lg px-3 py-2 text-sm font-mono text-zinc-100 placeholder:text-zinc-600 outline-none focus:border-indigo-500/50 disabled:opacity-50 transition-colors"
+              />
+            </div>
+
+            {/* Error */}
+            {compareModal.error && (
+              <p className="text-xs font-mono text-red-400 flex items-center gap-1.5">
+                <AlertCircle className="w-3 h-3 shrink-0" />
+                {compareModal.error}
+              </p>
+            )}
+
+            {/* Footer: status + submit */}
+            <div className="flex items-center justify-between pt-1">
+              {compareModal.status !== "idle" ? (
+                <span className="text-xs font-mono text-zinc-500 flex items-center gap-1.5">
+                  <Loader2 className="w-3 h-3 animate-spin" />
+                  {compareModal.status === "ingesting"
+                    ? "Ingesting second repo…"
+                    : "Comparing…"}
+                </span>
+              ) : (
+                <span />
+              )}
+              <button
+                onClick={handleCompare}
+                disabled={
+                  compareModal.status !== "idle" ||
+                  !compareModal.secondUrl.trim() ||
+                  !compareModal.question.trim()
+                }
+                className={cn(
+                  "px-4 py-2 rounded-lg text-xs font-mono font-medium transition-all duration-200",
+                  compareModal.status !== "idle" ||
+                  !compareModal.secondUrl.trim() ||
+                  !compareModal.question.trim()
+                    ? "bg-zinc-700 text-zinc-500 cursor-not-allowed"
+                    : "bg-indigo-600 hover:bg-indigo-500 text-white active:scale-95"
+                )}
+              >
+                Compare
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

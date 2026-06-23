@@ -53,6 +53,9 @@ const STEP_INDEX: Record<string, number> = {
   cloning: 0, parsing: 1, embedding: 2, indexing: 3,
 }
 
+const MAX_NETWORK_RETRIES = 3
+const MAX_POLL_MS = 5 * 60 * 1000
+
 function StepIcon({ status }: { status: StepStatus }) {
   if (status === "complete")
     return <CheckCircle2 className="w-5 h-5 text-indigo-400 shrink-0" />
@@ -77,6 +80,10 @@ export default function IngestPage() {
   const pollingRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // Captured immediately from the ingest response so navigation never depends on the poll
   const repoIdRef = useRef<string | null>(null)
+  // SF1: consecutive network-error count; resets on any successful HTTP response
+  const networkErrorCountRef = useRef(0)
+  // SF2: wall-clock time polling started, used to enforce a 5-minute hard cap
+  const pollStartRef = useRef<number | null>(null)
 
   const stopPolling = useCallback(() => {
     if (pollingRef.current) {
@@ -87,10 +94,21 @@ export default function IngestPage() {
 
   const pollJob = useCallback(
     async (id: string) => {
+      // SF2: bail out if polling has exceeded the 5-minute cap
+      if (pollStartRef.current !== null && Date.now() - pollStartRef.current > MAX_POLL_MS) {
+        stopPolling()
+        setError("This is taking longer than expected. You can refresh and re-enter the URL to try again.")
+        setIsAnalyzing(false)
+        return
+      }
+
       try {
         const res = await fetch(`${API_BASE}/api/repos/jobs/${id}`)
         if (!res.ok) throw new Error(`Status ${res.status}`)
         const data: JobResponse = await res.json()
+
+        // SF1: successful HTTP response resets the consecutive-error counter
+        networkErrorCountRef.current = 0
 
         if (data.status === "FAILED") {
           stopPolling()
@@ -111,7 +129,7 @@ export default function IngestPage() {
           return
         }
 
-        // PENDING — use the `step` field to show which pipeline stage is active
+        // QUEUED/PROCESSING — use the `step` field to show which pipeline stage is active
         if (data.step) {
           const activeIdx = STEP_INDEX[data.step] ?? -1
           setSteps((prev) =>
@@ -123,9 +141,13 @@ export default function IngestPage() {
           )
         }
       } catch {
-        stopPolling()
-        setError(`Cannot reach backend at ${API_BASE}. Is the server running?`)
-        setIsAnalyzing(false)
+        // SF1: only surface the error after 3 consecutive network failures
+        networkErrorCountRef.current += 1
+        if (networkErrorCountRef.current >= MAX_NETWORK_RETRIES) {
+          stopPolling()
+          setError(`Cannot reach backend at ${API_BASE}. Is the server running?`)
+          setIsAnalyzing(false)
+        }
       }
     },
     [router, stopPolling]
@@ -133,6 +155,10 @@ export default function IngestPage() {
 
   useEffect(() => {
     if (!jobId) return
+    // Record when polling starts (for the SF2 timeout) and reset the error counter.
+    // Ref assignments don't trigger the react-hooks/set-state-in-effect rule.
+    pollStartRef.current = Date.now()
+    networkErrorCountRef.current = 0
     // Defer the immediate poll one tick to avoid calling setState synchronously
     // inside the effect body (which triggers the react-hooks/set-state-in-effect rule).
     const t = setTimeout(() => pollJob(jobId), 0)
