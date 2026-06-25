@@ -19,6 +19,16 @@ import { cn } from "@/lib/utils"
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8001"
 
+function apiFetch(url: string, options: RequestInit = {}) {
+  return fetch(url, {
+    ...options,
+    headers: {
+      ...options.headers,
+      "ngrok-skip-browser-warning": "true",
+    },
+  })
+}
+
 const GITHUB_REPO_RE = /^https?:\/\/github\.com\/[^/]+\/[^/]+\/?$/
 
 type StepStatus = "pending" | "active" | "complete" | "failed"
@@ -103,7 +113,7 @@ export default function IngestPage() {
       }
 
       try {
-        const res = await fetch(`${API_BASE}/api/repos/jobs/${id}`)
+        const res = await apiFetch(`${API_BASE}/api/repos/jobs/${id}`)
         if (!res.ok) throw new Error(`Status ${res.status}`)
         const data: JobResponse = await res.json()
 
@@ -182,7 +192,7 @@ export default function IngestPage() {
     setSteps(STEPS.map((s) => ({ ...s, status: "pending" })))
 
     try {
-      const res = await fetch(`${API_BASE}/api/repos/ingest`, {
+      const res = await apiFetch(`${API_BASE}/api/repos/ingest`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ github_url: trimmed, user_id: "demo" }),
